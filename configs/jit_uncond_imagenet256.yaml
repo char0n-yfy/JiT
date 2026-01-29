@@ -1,0 +1,67 @@
+# Unconditional JiT denoiser (continuous t) configuration.
+#
+# Notes:
+# - This repo uses t in (0, 1) where t=0 is pure noise and t=1 is clean data.
+# - Set `data_path`, `output_dir`, and `resume` to your local paths.
+
+# --- Model / architecture ---
+model: JiT-B/16
+img_size: 256
+attn_dropout: 0.0
+proj_dropout: 0.0
+
+# --- Training ---
+epochs: 600
+warmup_epochs: 5
+batch_size: 128
+lr: null
+blr: 5.0e-5
+min_lr: 0.0
+lr_schedule: constant
+weight_decay: 0.0
+
+ema_decay1: 0.9999
+ema_decay2: 0.9996
+
+# logit-normal t sampler (paper default)
+P_mean: -0.8
+P_std: 0.8
+
+# noise model
+noise_scale: 1.0
+t_eps: 5.0e-2
+
+seed: 0
+start_epoch: 0
+num_workers: 12
+pin_mem: true
+
+# --- Sampling / ODE solver (used by denoise eval) ---
+sampling_method: heun
+num_sampling_steps: 50
+
+# --- Denoise evaluation ---
+eval_freq: 40
+online_eval_denoise: false
+evaluate_denoise: false
+eval_bsz: 128
+
+denoise_split: val
+denoise_t: 0.5
+denoise_mode: ode         # one of: [single, ode]
+denoise_steps: null       # null -> use num_sampling_steps
+denoise_num_images: 2048
+
+# --- I/O ---
+data_path: ./data/imagenet
+output_dir: ./output_dir
+resume: ""
+save_last_freq: 5
+log_freq: 100
+
+# --- Device / distributed ---
+device: cuda
+world_size: 1
+local_rank: -1
+dist_on_itp: false
+dist_url: env://
