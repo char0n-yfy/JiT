@@ -33,6 +33,7 @@ def get_args_parser():
     parser.add_argument('--img_size', default=256, type=int, help='Image size')
     parser.add_argument('--attn_dropout', type=float, default=0.0, help='Attention dropout rate')
     parser.add_argument('--proj_dropout', type=float, default=0.0, help='Projection dropout rate')
+    parser.add_argument('--gated_attn', action='store_true', help='Use post-SDPA gated attention (G1 variant)')
 
     # training
     parser.add_argument('--epochs', default=200, type=int)
@@ -86,6 +87,8 @@ def get_args_parser():
                         help='Dataset split folder under data_path (e.g., val/train)')
     parser.add_argument('--denoise_t', default=0.5, type=float,
                         help='Noise time t used for x->z_t corruption during denoise eval (0=noise, 1=clean)')
+    parser.add_argument('--denoise_t_list', default=None, nargs='+', type=float,
+                        help='Optional list of noise times t for denoise eval/visualization (overrides --denoise_t when set)')
     parser.add_argument('--denoise_mode', default='ode', type=str, choices=['single', 'ode'],
                         help='single: one-step x_pred at t; ode: integrate z(t)->z(1)')
     parser.add_argument('--denoise_steps', default=None, type=int,
@@ -139,6 +142,7 @@ def _load_yaml_config(path: str) -> dict[str, Any]:
 
 def parse_args_with_config() -> argparse.Namespace:
     parser = get_args_parser()
+    default_output_dir = parser.get_default("output_dir")
 
     # First pass: only to discover --config (and tolerate unknown args).
     cfg_args, _unknown = parser.parse_known_args()
@@ -153,7 +157,16 @@ def parse_args_with_config() -> argparse.Namespace:
 
         parser.set_defaults(**cfg)
 
-    return parser.parse_args()
+    args = parser.parse_args()
+
+    # If a config file is used and output_dir is left as the default placeholder,
+    # derive a run directory from the config filename for convenience.
+    if args.config:
+        if args.output_dir in (None, "", "auto", default_output_dir):
+            cfg_stem = Path(args.config).stem
+            args.output_dir = str(Path(default_output_dir) / cfg_stem)
+
+    return args
 
 
 def main(args):
@@ -174,9 +187,11 @@ def main(args):
     global_rank = misc.get_rank()
 
     # Set up TensorBoard logging (only on main process)
-    if global_rank == 0 and args.output_dir is not None:
+    if global_rank == 0 and args.output_dir:
         os.makedirs(args.output_dir, exist_ok=True)
-        log_writer = SummaryWriter(log_dir=args.output_dir)
+        tb_dir = os.path.join(args.output_dir, "tb")
+        os.makedirs(tb_dir, exist_ok=True)
+        log_writer = SummaryWriter(log_dir=tb_dir)
     else:
         log_writer = None
 
@@ -223,8 +238,11 @@ def main(args):
     print("Actual lr: {:.2e}".format(args.lr))
     print("Effective batch size: %d" % eff_batch_size)
 
-    model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[args.gpu])
-    model_without_ddp = model.module
+    if args.distributed:
+        model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[args.gpu])
+        model_without_ddp = model.module
+    else:
+        model_without_ddp = model
 
     # Set up optimizer with weight decay adjustment for bias and norm layers
     param_groups = misc.add_weight_decay(model_without_ddp, args.weight_decay)
@@ -232,8 +250,18 @@ def main(args):
     print(optimizer)
 
     # Resume from checkpoint if provided
-    checkpoint_path = os.path.join(args.resume, "checkpoint-last.pth") if args.resume else None
-    if checkpoint_path and os.path.exists(checkpoint_path):
+    checkpoint_path = None
+    if args.resume:
+        candidate_paths = [
+            os.path.join(args.resume, "checkpoints", "checkpoint-last.pth"),
+            os.path.join(args.resume, "checkpoint-last.pth"),  # backward compatible
+        ]
+        for p in candidate_paths:
+            if os.path.exists(p):
+                checkpoint_path = p
+                break
+
+    if checkpoint_path:
         checkpoint = torch.load(checkpoint_path, map_location='cpu')
         model_without_ddp.load_state_dict(checkpoint['model'])
 
@@ -241,7 +269,7 @@ def main(args):
         ema_state_dict2 = checkpoint['model_ema2']
         model_without_ddp.ema_params1 = [ema_state_dict1[name].cuda() for name, _ in model_without_ddp.named_parameters()]
         model_without_ddp.ema_params2 = [ema_state_dict2[name].cuda() for name, _ in model_without_ddp.named_parameters()]
-        print("Resumed checkpoint from", args.resume)
+        print("Resumed checkpoint from", checkpoint_path)
 
         if 'optimizer' in checkpoint and 'epoch' in checkpoint:
             optimizer.load_state_dict(checkpoint['optimizer'])
@@ -266,7 +294,8 @@ def main(args):
     print(f"Start training for {args.epochs} epochs")
     start_time = time.time()
     for epoch in range(args.start_epoch, args.epochs):
-        if args.distributed:
+        # DistributedSampler uses the epoch to deterministically change shuffle order.
+        if hasattr(data_loader_train.sampler, "set_epoch"):
             data_loader_train.sampler.set_epoch(epoch)
 
         train_one_epoch(model, model_without_ddp, data_loader_train, optimizer, device, epoch, log_writer=log_writer, args=args)
@@ -305,5 +334,6 @@ def main(args):
 
 if __name__ == '__main__':
     args = parse_args_with_config()
-    Path(args.output_dir).mkdir(parents=True, exist_ok=True)
+    if args.output_dir:
+        Path(args.output_dir).mkdir(parents=True, exist_ok=True)
     main(args)

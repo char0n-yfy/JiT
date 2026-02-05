@@ -14,6 +14,7 @@ class Denoiser(nn.Module):
             in_channels=3,
             attn_drop=args.attn_dropout,
             proj_drop=args.proj_dropout,
+            gated_attn=getattr(args, "gated_attn", False),
         )
         self.img_size = args.img_size
 

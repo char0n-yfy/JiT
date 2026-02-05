@@ -1,8 +1,11 @@
-# Unconditional JiT denoiser (continuous t) configuration.
+# Smoke test config: run 1 epoch and exercise training + denoise eval + checkpointing.
+#
+# Usage (override data_path as needed):
+#   python main_jit.py --config configs/smoke_test.yaml --data_path /path/to/imagenet
 #
 # Notes:
-# - This repo uses t in (0, 1) where t=0 is pure noise and t=1 is clean data.
-# - Set `data_path`, `output_dir`, and `resume` to your local paths.
+# - Expects ImageFolder layout under data_path: train/ (and optionally val/).
+# - Uses a small batch/steps/num_images to finish quickly.
 
 # --- Model / architecture ---
 model: JiT-B/16
@@ -12,8 +15,8 @@ proj_dropout: 0.0
 gated_attn: true
 
 # --- Training ---
-epochs: 200
-warmup_epochs: 5
+epochs: 1
+warmup_epochs: 1
 batch_size: 400
 lr: null
 blr: 5.0e-5
@@ -24,42 +27,39 @@ weight_decay: 0.0
 ema_decay1: 0.9999
 ema_decay2: 0.9996
 
-# logit-normal t sampler (paper default)
 P_mean: -0.8
 P_std: 0.8
-
-# noise model
 noise_scale: 1.0
 t_eps: 5.0e-2
 
 seed: 0
 start_epoch: 0
-num_workers: 14
+num_workers: 12
 pin_mem: true
+log_freq: 1
 
 # --- Sampling / ODE solver (used by denoise eval) ---
 sampling_method: heun
-num_sampling_steps: 50
+num_sampling_steps: 10
 
 # --- Denoise evaluation ---
-eval_freq: 100
 online_eval_denoise: true
+eval_freq: 1
 evaluate_denoise: false
 eval_bsz: 400
 
 denoise_split: val
 denoise_t: 0.5
-denoise_t_list: [0.2, 0.5, 0.8]       # e.g., [0.2, 0.5, 0.8]; null -> use denoise_t
-denoise_mode: ode         # one of: [single, ode]
-denoise_steps: null       # null -> use num_sampling_steps
-denoise_num_images: 2000
+denoise_t_list: [0.2, 0.5, 0.8]
+denoise_mode: ode
+denoise_steps: null
+denoise_num_images: 32
 
 # --- I/O ---
 data_path: /root/autodl-tmp/imagenet
 output_dir: auto
 resume: ""
-save_last_freq: 5
-log_freq: 100
+save_last_freq: 1
 
 # --- Device / distributed ---
 device: cuda

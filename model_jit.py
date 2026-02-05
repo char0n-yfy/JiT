@@ -77,21 +77,8 @@ class TimestepEmbedder(nn.Module):
         return t_emb
 
 
-def scaled_dot_product_attention(query, key, value, dropout_p=0.0) -> torch.Tensor:
-    L, S = query.size(-2), key.size(-2)
-    scale_factor = 1 / math.sqrt(query.size(-1))
-    attn_bias = torch.zeros(query.size(0), 1, L, S, dtype=query.dtype).cuda()
-
-    with torch.cuda.amp.autocast(enabled=False):
-        attn_weight = query.float() @ key.float().transpose(-2, -1) * scale_factor
-    attn_weight += attn_bias
-    attn_weight = torch.softmax(attn_weight, dim=-1)
-    attn_weight = torch.dropout(attn_weight, dropout_p, train=True)
-    return attn_weight @ value
-
-
 class Attention(nn.Module):
-    def __init__(self, dim, num_heads=8, qkv_bias=True, qk_norm=True, attn_drop=0., proj_drop=0.):
+    def __init__(self, dim, num_heads=8, qkv_bias=True, qk_norm=True, attn_drop=0., proj_drop=0., gated: bool = False):
         super().__init__()
         self.num_heads = num_heads
         head_dim = dim // num_heads
@@ -104,8 +91,14 @@ class Attention(nn.Module):
         self.proj = nn.Linear(dim, dim)
         self.proj_drop = nn.Dropout(proj_drop)
 
+        # Post-SDPA gating (G1 variant)
+        self.gated = gated
+        if gated:
+            self.gate = nn.Linear(dim, dim, bias=True)
+
     def forward(self, x, rope):
         B, N, C = x.shape
+        x_in = x  # gate is conditioned on attention input X (G1 post-SDPA gating)
         qkv = self.qkv(x).reshape(B, N, 3, self.num_heads, C // self.num_heads).permute(2, 0, 3, 1, 4)
         q, k, v = qkv[0], qkv[1], qkv[2]   # make torchscript happy (cannot use tensor as tuple)
 
@@ -115,9 +108,20 @@ class Attention(nn.Module):
         q = rope(q)
         k = rope(k)
 
-        x = scaled_dot_product_attention(q, k, v, dropout_p=self.attn_drop.p if self.training else 0.)
+        x = F.scaled_dot_product_attention(
+            q,
+            k,
+            v,
+            attn_mask=None,
+            dropout_p=self.attn_drop.p if self.training else 0.0,
+            is_causal=False,
+        )
 
+        # back to [B, N, C]
         x = x.transpose(1, 2).reshape(B, N, C)
+        if self.gated:
+            gate = torch.sigmoid(self.gate(x_in))
+            x = x * gate
 
         x = self.proj(x)
         x = self.proj_drop(x)
@@ -167,11 +171,11 @@ class FinalLayer(nn.Module):
 
 
 class JiTBlock(nn.Module):
-    def __init__(self, hidden_size, num_heads, mlp_ratio=4.0, attn_drop=0.0, proj_drop=0.0):
+    def __init__(self, hidden_size, num_heads, mlp_ratio=4.0, attn_drop=0.0, proj_drop=0.0, gated_attn: bool = False):
         super().__init__()
         self.norm1 = RMSNorm(hidden_size, eps=1e-6)
         self.attn = Attention(hidden_size, num_heads=num_heads, qkv_bias=True, qk_norm=True,
-                              attn_drop=attn_drop, proj_drop=proj_drop)
+                              attn_drop=attn_drop, proj_drop=proj_drop, gated=gated_attn)
         self.norm2 = RMSNorm(hidden_size, eps=1e-6)
         mlp_hidden_dim = int(hidden_size * mlp_ratio)
         self.mlp = SwiGLUFFN(hidden_size, mlp_hidden_dim, drop=proj_drop)
@@ -204,6 +208,7 @@ class JiT(nn.Module):
         attn_drop=0.0,
         proj_drop=0.0,
         bottleneck_dim=128,
+        gated_attn: bool = False,
     ):
         super().__init__()
         self.in_channels = in_channels
@@ -212,6 +217,7 @@ class JiT(nn.Module):
         self.num_heads = num_heads
         self.hidden_size = hidden_size
         self.input_size = input_size
+        self.gated_attn = gated_attn
 
         # time embed
         self.t_embedder = TimestepEmbedder(hidden_size)
@@ -236,7 +242,8 @@ class JiT(nn.Module):
         self.blocks = nn.ModuleList([
             JiTBlock(hidden_size, num_heads, mlp_ratio=mlp_ratio,
                      attn_drop=attn_drop if (depth // 4 * 3 > i >= depth // 4) else 0.0,
-                     proj_drop=proj_drop if (depth // 4 * 3 > i >= depth // 4) else 0.0)
+                     proj_drop=proj_drop if (depth // 4 * 3 > i >= depth // 4) else 0.0,
+                     gated_attn=gated_attn)
             for i in range(depth)
         ])
 
