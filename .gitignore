@@ -6,6 +6,4 @@ __pycache__/
 .ssh
 /jit/
 /output_dir/
-/HiDDeN-master/
-/ssl_watermarking-main/
-/stegastamp_pkg/
+/watermarking/

@@ -41,15 +41,27 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from denoiser import Denoiser
-from utils.metrics import compute_ber, compute_lpips, compute_psnr, compute_ssim
-from utils.preprocess import square_image
-from utils.watermarkers import (
-    DwtDctSvdWatermarker,
-    HiDDeNWatermarker,
-    RivaGANWatermarker,
-    SSLLatentWatermarker,
-    StegaStampWatermarker,
-)
+try:
+    from watermarking.utils.metrics import compute_ber, compute_lpips, compute_psnr, compute_ssim
+    from watermarking.utils.preprocess import square_image
+    from watermarking.utils.watermarkers import (
+        DwtDctSvdWatermarker,
+        HiDDeNWatermarker,
+        RivaGANWatermarker,
+        SSLLatentWatermarker,
+        StegaStampWatermarker,
+    )
+except ImportError:
+    # Backward compatibility for pre-migration layout.
+    from utils.metrics import compute_ber, compute_lpips, compute_psnr, compute_ssim
+    from utils.preprocess import square_image
+    from utils.watermarkers import (
+        DwtDctSvdWatermarker,
+        HiDDeNWatermarker,
+        RivaGANWatermarker,
+        SSLLatentWatermarker,
+        StegaStampWatermarker,
+    )
 
 
 def parse_args() -> argparse.Namespace:
@@ -84,9 +96,9 @@ def parse_args() -> argparse.Namespace:
     parser.set_defaults(use_ema1=True)
 
     parser.add_argument("--stega_encoder_path", type=str,
-                        default="stegastamp_pkg/weights/encoder_best_loss_0.005250_step_66185.pth")
+                        default="watermarking/stegastamp_pkg/weights/encoder_best_loss_0.005250_step_66185.pth")
     parser.add_argument("--stega_decoder_path", type=str,
-                        default="stegastamp_pkg/weights/decoder_best_loss_0.005250_step_66185.pth")
+                        default="watermarking/stegastamp_pkg/weights/decoder_best_loss_0.005250_step_66185.pth")
 
     parser.add_argument("--dwt_payload_bits", type=int, default=32)
 
@@ -94,9 +106,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--rivagan_threshold", type=float, default=0.52)
 
     parser.add_argument("--ssl_payload_bits", type=int, default=30)
-    parser.add_argument("--ssl_model_path", type=str, default="ssl_watermarking-main/models/dino_r50_plus.pth")
-    parser.add_argument("--ssl_normlayer_path", type=str, default="ssl_watermarking-main/normalayer/out2048_coco_orig.pth")
-    parser.add_argument("--ssl_carrier_path", type=str, default="ssl_watermarking-main/seed/ssl_carrier_seed2025.pt")
+    parser.add_argument("--ssl_model_path", type=str, default="watermarking/ssl_watermarking-main/models/dino_r50_plus.pth")
+    parser.add_argument("--ssl_normlayer_path", type=str, default="watermarking/ssl_watermarking-main/normalayer/out2048_coco_orig.pth")
+    parser.add_argument("--ssl_carrier_path", type=str, default="watermarking/ssl_watermarking-main/seed/ssl_carrier_seed2025.pt")
     parser.add_argument("--ssl_epochs", type=int, default=10)
     parser.add_argument("--ssl_target_psnr", type=float, default=40.0)
     parser.add_argument("--ssl_lambda_w", type=float, default=5e4)
@@ -105,7 +117,7 @@ def parse_args() -> argparse.Namespace:
 
     parser.add_argument("--hidden_payload_bits", type=int, default=30)
     parser.add_argument("--hidden_checkpoint_path", type=str,
-                        default="HiDDeN-master/experiments/jpeg-compression/checkpoints/epoch-300.pyt")
+                        default="watermarking/HiDDeN-master/experiments/jpeg-compression/checkpoints/epoch-300.pyt")
 
     return parser.parse_args()
 
@@ -151,6 +163,27 @@ def resolve_checkpoints(ckpt_dir: Path, explicit: list[str] | None) -> list[Path
     return paths
 
 
+def resolve_repo_path(root: Path, path_like: str | Path) -> Path:
+    path = Path(path_like)
+    if path.is_absolute():
+        return path
+
+    direct = root / path
+    if direct.exists():
+        return direct
+
+    if path.parts and path.parts[0] != "watermarking":
+        moved = root / "watermarking" / path
+        if moved.exists():
+            return moved
+    else:
+        legacy = root / Path(*path.parts[1:])
+        if legacy.exists():
+            return legacy
+
+    return direct
+
+
 def load_torch_checkpoint_compat(path: Path, map_location: str = "cpu") -> Any:
     """Load checkpoints across torch versions with a safe-first fallback path."""
     try:
@@ -184,8 +217,8 @@ def build_watermarkers(args: argparse.Namespace, root: Path) -> dict[str, Any]:
 
     if "stega" in algos:
         wm["stega"] = StegaStampWatermarker(
-            encoder_path=root / args.stega_encoder_path,
-            decoder_path=root / args.stega_decoder_path,
+            encoder_path=resolve_repo_path(root, args.stega_encoder_path),
+            decoder_path=resolve_repo_path(root, args.stega_decoder_path),
             payload_bits=100,
         )
     if "dwt" in algos:
@@ -198,9 +231,9 @@ def build_watermarkers(args: argparse.Namespace, root: Path) -> dict[str, Any]:
     if "ssl" in algos:
         wm["ssl"] = SSLLatentWatermarker(
             payload_bits=args.ssl_payload_bits,
-            model_path=root / args.ssl_model_path,
-            normlayer_path=root / args.ssl_normlayer_path,
-            carrier_path=root / args.ssl_carrier_path,
+            model_path=resolve_repo_path(root, args.ssl_model_path),
+            normlayer_path=resolve_repo_path(root, args.ssl_normlayer_path),
+            carrier_path=resolve_repo_path(root, args.ssl_carrier_path),
             epochs=args.ssl_epochs,
             target_psnr=args.ssl_target_psnr,
             lambda_w=args.ssl_lambda_w,
@@ -210,7 +243,7 @@ def build_watermarkers(args: argparse.Namespace, root: Path) -> dict[str, Any]:
     if "hidden" in algos:
         wm["hidden"] = HiDDeNWatermarker(
             payload_bits=args.hidden_payload_bits,
-            checkpoint_path=root / args.hidden_checkpoint_path,
+            checkpoint_path=resolve_repo_path(root, args.hidden_checkpoint_path),
         )
     return wm
 
